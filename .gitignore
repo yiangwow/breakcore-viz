@@ -1,0 +1,4 @@
+/target
+
+# local settings with a real key: copy .env.example to .env
+.env
