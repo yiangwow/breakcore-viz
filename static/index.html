@@ -136,10 +136,10 @@ const CFG = {
 
   // Shader tuning
   scene: {
-    steps: 56, maxDist: 30.0, surfThreshold: 0.022,
+    steps: 48, maxDist: 30.0, surfThreshold: 0.022,
   },
   post: {
-    bloomThreshold: 0.05, bloomIntensity: 12.0, bloomKickBoost: 3.0,
+    bloomThreshold: 0.09, bloomIntensity: 6.5, bloomKickBoost: 3.0,
     feedbackBaseZoom: 0.98, feedbackDecay: 0.65, feedbackBlend: 0.5,
     vignetteStrength: 0.5,
   },
@@ -147,6 +147,8 @@ const CFG = {
   // HUD
   debugMode: new URLSearchParams(window.location.search).has('debug'),
   demoMode: new URLSearchParams(window.location.search).has('demo'),
+  minimalMode: new URLSearchParams(window.location.search).has('minimal'),
+  noPostMode: new URLSearchParams(window.location.search).has('nopost'),
 };
 
 // ─── Error Handling ─────────────────────────────────────────────────
@@ -288,6 +290,14 @@ float tunnelWallSDF(vec3 p) {
 float attractorSDF(vec3 p) {
   vec3 bhPos = vec3(uCamXY, uBHZ);
   vec3 rel = p - bhPos;
+
+  // Invisible early-out: when ray point is far from BH, only horizon matters
+  // (disks extend to ~2x BHSize, so beyond 4x is safely outside).
+  // Coherent branch: nearby pixels agree on far/near, so warp stays unified.
+  float farLen = length(rel);
+  if (farLen > uBHSize * 4.0) {
+    return farLen - uBHSize * 0.4;
+  }
 
   // Tilt the disk so it's not perfectly edge-on
   float tilt = 0.35 + sin(uTime * 0.07) * 0.1;
@@ -502,6 +512,14 @@ float spawnSDF(vec3 p, vec4 slotA, vec4 slotB) {
 
 // ── Crimson Desert Cube Field ──
 float cubefieldSDF(vec3 p) {
+  // Invisible early-out: cube edges live in rxy ~ [1.52, 13.48] (centers 2.25-12.75
+  // with rotated bounding-sphere radius 0.73). Outside that band, the true SDF is
+  // bounded below by the radial gap. Returning that gap is a valid SDF and is
+  // always ≥ 0.52 (well above SURF=0.022) so it cannot be mistaken for a hit.
+  float rxy = length(p.xy);
+  if (rxy < 1.0) return 1.52 - rxy;
+  if (rxy > 14.0) return rxy - 13.48;
+
   float minD = 999.0;
   float period = 1.8;
   float cellZ = floor((p.z + period * 0.5) / period);
@@ -648,44 +666,51 @@ void main() {
       }
     } else if(abs(dSpawn - nearest) < 0.02 && hitSpawn >= 0) {
       float spawnType = uSpawnA[hitSpawn].w;
+      // Base multipliers restored for calm-phase color; only kick-scaling
+      // stays tamed so peak kicks don't blow surfaces above 1.0.
       if (spawnType < 2.5) {
-        surfCol = kickCol * (0.4 + uKick * 1.0);
+        surfCol = kickCol * (0.4 + uKick * 0.4);
       } else if (spawnType < 5.5) {
-        surfCol = hatCol * (0.2 + uEnergy * 0.2 + uKick * 0.3);
+        surfCol = hatCol * (0.35 + uEnergy * 0.3 + uKick * 0.2);
       } else if (spawnType < 6.5) {
-        surfCol = snareCol * (0.5 + uKick * 0.8 + uHat * 0.8);
+        surfCol = snareCol * (0.5 + uKick * 0.4 + uHat * 0.4);
       } else if (spawnType < 7.5) {
-        surfCol = vec3(0.8, 0.85, 0.9) * (0.4 + uKick * 1.0);
+        surfCol = vec3(0.8, 0.85, 0.9) * (0.4 + uKick * 0.4);
       } else if (spawnType < 8.5) {
-        surfCol = kickCol * (0.5 + uKick * 0.8 + uChaos * 0.3);
+        surfCol = kickCol * (0.45 + uKick * 0.4 + uChaos * 0.2);
       } else if (spawnType < 15.5) {
-        // Type 15: Hero cube — Crimson Desert intense blue-white on kicks
+        // Type 15: Hero cube — base restored, peak tamed (was 3.0x at peak, now 1.7x)
         surfCol = mix(vec3(0.2, 0.35, 0.7), kickCol, uKick * 0.6)
-                  * (0.5 + uEnergy * 0.9 + uKick * 1.6);
+                  * (0.45 + uEnergy * 0.55 + uKick * 0.7);
       } else {
-        // Types 9+ — moderate metallic
-        surfCol = mix(snareCol, kickCol, uKick * 0.3) * (0.3 + uEnergy * 0.3 + uKick * 0.5);
+        surfCol = mix(snareCol, kickCol, uKick * 0.3) * (0.3 + uEnergy * 0.3 + uKick * 0.3);
       }
     } else if (abs(dCube - nearest) < 0.02) {
-      // Crimson Desert cube field — blue-dark metallic, energy-lit edges
+      // Cube field — calm base restored to 0.35 (was 0.35 original, then 0.25),
+      // peak still tamed (was 2.65x, now 1.45x)
       vec3 cubeBase = mix(vec3(0.08, 0.14, 0.32), vec3(0.3, 0.45, 0.75),
                           uEnergy * 0.7 + uKick * 0.5);
-      surfCol = cubeBase * (0.35 + uEnergy * 0.9 + uKick * 1.4);
+      surfCol = cubeBase * (0.35 + uEnergy * 0.5 + uKick * 0.6);
       surfCol *= 0.85 + 0.15 * sin(p.z * 0.4 + uTime * 0.25);
     } else {
+      // Tunnel walls — base restored to 0.4, kick scale stays 0.5
       surfCol = mix(snareCol, kickCol, uKick * 0.5);
       surfCol = mix(surfCol, hatCol, uHat * 0.3);
-      surfCol *= 0.4 + uKick * 1.0;
+      surfCol *= 0.4 + uKick * 0.5;
     }
 
-    float glow = (1.0 + uKick*1.0) / (1.0 + dist*0.08);
+    // Close-object glow — base restored to 0.9 (calm has visible objects),
+    // kick scale stays 0.5 (peak max 1.4x instead of original 2.0x)
+    float glow = (0.9 + uKick*0.5) / (1.0 + dist*0.08);
     col = surfCol * glow;
 
     vec3 rimCol = mix(hatCol, kickCol, 0.5+0.5*sin(uTime));
     col += rimCol * smoothstep(0.01, 0.05, minDist) * (0.2 + uKick * 0.4);
   }
 
-  col += bhCol * min(bhGlow, 0.8) * (0.2 + uKick * 1.0);
+  // Central BH glow boosted (was 0.2+1.0*kick, now 0.35+1.2*kick) — keeps
+  // visible "energy core" in the middle of the screen instead of dark void
+  col += bhCol * min(bhGlow, 0.8) * (0.35 + uKick * 1.2);
 
   vec3 glowCol = mix(snareCol, kickCol, 0.5+0.5*sin(uTime*0.5));
   col += glowCol * glowAccum * (0.4 + uKick * 0.6);
@@ -788,11 +813,13 @@ void main() {
     }
   }
 
-  // Chromatic aberration — driven by HAT frequencies (high freq = RGB fringing)
-  // PHASE 6: ULTRA 3-pass CA with extreme separation
+  // Chromatic aberration — coefficients cut ~8x (was 0.12/0.18/0.25, reaching
+  // 27% screen offset at typical breakcore values, smearing RGB across half
+  // the image = soft-edged tendrils). Now produces visible fringing without
+  // turning everything into watercolor.
   vec2 caDir = uv - 0.5;
-  float caBase = 0.001 + uEnergy * 0.12 + uKick * 0.18 + uHat * 0.25;
-  float caR = caBase * (1.0 + smoothstep(0.1, 0.4, uImpact) * 4.0);
+  float caBase = 0.001 + uEnergy * 0.015 + uKick * 0.022 + uHat * 0.03;
+  float caR = caBase * (1.0 + smoothstep(0.1, 0.4, uImpact) * 1.5);
   float caG = caBase * 0.6;
   float caB = -caBase * 1.5;
 
@@ -837,25 +864,29 @@ void main() {
   // PHASE 7: Multiple bloom passes for mega glow
   vec3 bloom = vec3(0.0); float total = 0.0;
 
-  // Pass 1: Wide bloom
+  // Pass 1: Tight bloom (radius 2.5) for crisp tendril cores instead of
+  // soft gradient halos around every bright pixel
   for (int i = -4; i <= 4; i++) {
     float w = exp(-float(i*i)/4.0);
-    bloom += sampleScene(uv + vec2(float(i)/uRes.x*6.0, 0.0)) * w;
-    bloom += sampleScene(uv + vec2(0.0, float(i)/uRes.y*6.0)) * w;
+    bloom += sampleScene(uv + vec2(float(i)/uRes.x*2.5, 0.0)) * w;
+    bloom += sampleScene(uv + vec2(0.0, float(i)/uRes.y*2.5)) * w;
     total += w * 2.0;
   }
 
-  // Pass 2: Extended bloom at high energy
+  // Pass 2: Wider bloom at high energy (radius 4.0, was 6.0) — adds energy
+  // halo only on the brightest tendril sections
   if (uEnergy > 0.6) {
     for (int i = -8; i <= 8; i+=2) {
       float w = exp(-float(i*i)/16.0);
-      bloom += sampleScene(uv + vec2(float(i)/uRes.x*12.0, 0.0)) * w * 0.5;
-      bloom += sampleScene(uv + vec2(0.0, float(i)/uRes.y*12.0)) * w * 0.5;
+      bloom += sampleScene(uv + vec2(float(i)/uRes.x*4.0, 0.0)) * w * 0.5;
+      bloom += sampleScene(uv + vec2(0.0, float(i)/uRes.y*4.0)) * w * 0.5;
       total += w * 2.0 * 0.5;
     }
   }
 
-  float bloomThresh = mix(${CFG.post.bloomThreshold.toFixed(2)}, 0.0, smoothstep(0.3, 1.0, uEnergy));
+  // Threshold compromise: 0.09 base / 0.05 at peak so mid-brightness center
+  // pixels (near BH, distant tunnel) still get bloom — keeps color in middle
+  float bloomThresh = mix(${CFG.post.bloomThreshold.toFixed(2)}, 0.05, smoothstep(0.3, 1.0, uEnergy));
   bloom = max(bloom/total - bloomThresh, 0.0) * ${CFG.post.bloomIntensity.toFixed(1)};
 
   // BONUS: white-hot overexposure on extreme impact
@@ -863,46 +894,47 @@ void main() {
     bloom = mix(bloom, vec3(1.0), smoothstep(0.5, 1.0, uImpact) * 0.9);
   }
 
-  // PHASE 7: Massive bloom boost at extreme energy
+  // PHASE 7: Heavily reduced peak boost (was 5.0 -> 2.5 -> now 1.3)
+  // to keep tendrils as discrete beams instead of a screen wash
   if (uEnergy > 0.85) {
-    bloom *= mix(1.0, 5.0, smoothstep(0.85, 1.0, uEnergy));
+    bloom *= mix(1.0, 1.3, smoothstep(0.85, 1.0, uEnergy));
   }
 
-  col += bloom * mix(0.04, 1.5, uKick) * mix(1.0, 5.0, uEnergy);
+  // Final col contribution — energy mult heavily reduced (5.0 -> 3.0 -> now 1.5)
+  col += bloom * mix(0.04, 1.5, uKick) * mix(1.0, 1.5, uEnergy);
 
   // Feedback trail — PHASE 6: EXTREME ghosting (longer trails, multiple layers)
   float feedbackZoom = ${CFG.post.feedbackBaseZoom.toFixed(2)} - uCamSpeed * 0.004 - uImpact * 0.02;
   vec2 prevUV = clamp((vUV - 0.5) * feedbackZoom + 0.5, 0.01, 0.99);
   vec3 prev = samplePrev(prevUV);
 
-  // PHASE 6: Multi-layer ghosting at high energy
-  if (uEnergy > 0.5) {
-    vec3 prev2 = samplePrev(clamp((vUV - 0.5) * (feedbackZoom * 0.95) + 0.5, 0.01, 0.99));
-    vec3 prev3 = samplePrev(clamp((vUV - 0.5) * (feedbackZoom * 0.90) + 0.5, 0.01, 0.99));
-    prev = prev * 0.5 + prev2 * 0.3 + prev3 * 0.2;
-  } else {
-    prev = prev * 0.5;
-  }
+  // Single-layer feedback only. The multi-layer ghosting (3 zoomed samples)
+  // at uEnergy > 0.5 was creating motion-blur / myopia at high energy.
+  prev = prev * 0.5;
 
   float edgeFade = smoothstep(0.0, 0.03, min(min(vUV.x, 1.0-vUV.x), min(vUV.y, 1.0-vUV.y)));
   prev *= edgeFade;
-  col = mix(col, max(prev, col), mix(uKick * 0.08, 0.6, smoothstep(0.6, 1.0, uEnergy)));
+  // Feedback mix at peak reduced 0.6 -> 0.35 — stops brightness accumulating
+  // across frames into a permanent white wash
+  col = mix(col, max(prev, col), mix(uKick * 0.08, 0.35, smoothstep(0.6, 1.0, uEnergy)));
 
   // DYING MODE FLASH STROBING — frequency-reactive
+  // Heavily reduced (was adding +0.18 to all channels at mid energy, creating
+  // the warp section white wash). Now only brief kick flashes pop through.
   vec3 flashCol = vec3(1.0);
   float flashIntensity = 0.0;
 
-  // Kick flash: white → red (driven by uKick)
-  flashIntensity = max(flashIntensity, smoothstep(0.12, 0.35, uKick) * 0.4);
+  // Kick flash (was 0.4, now 0.15)
+  flashIntensity = max(flashIntensity, smoothstep(0.12, 0.35, uKick) * 0.15);
   flashCol = mix(flashCol, vec3(1.0, 0.1, 0.05), smoothstep(0.15, 0.35, uKick));
 
-  // Hat/snare frequency response → RGB flashing
+  // Hat/snare flash (was 0.6, now 0.2)
   float highFreqFlash = (uHat * 0.5 + uSnare * 0.3) * mod(uTime * 30.0, 1.0);
-  flashIntensity = max(flashIntensity, highFreqFlash * 0.6);
+  flashIntensity = max(flashIntensity, highFreqFlash * 0.2);
 
-  // Sub bass → White overexposure flash
+  // Sub bass flash (was 0.8, now 0.25)
   if (uSub > 0.4) {
-    flashIntensity = max(flashIntensity, (uSub - 0.4) * 0.8);
+    flashIntensity = max(flashIntensity, (uSub - 0.4) * 0.25);
     flashCol = mix(flashCol, vec3(1.0, 1.0, 0.8), uSub * 0.3);
   }
 
@@ -916,7 +948,8 @@ void main() {
     flashCol = mix(flashCol, rgbCycle, uChaos * 0.5);
   }
 
-  col += flashCol * flashIntensity * mix(0.2, 1.0, uEnergy);
+  // Final mix reduced (was up to 1.0 at peak energy, now up to 0.35)
+  col += flashCol * flashIntensity * mix(0.1, 0.35, uEnergy);
 
   // BH pass-through flash — red-tinted, softer, no white-out
   if (uFlash > 0.01) {
@@ -931,34 +964,41 @@ void main() {
     col = mix(col, vec3(1.0) - col, invStr);
   }
 
-  // Saturation boost — dying mode (driven by KICK for red saturation spikes)
+  // Saturation boost — calm phase was 0.3 (70% desaturated to gray, killing
+  // geometric world color). Now 0.9 at calm (full color), still pumped at peak.
   vec3 gray = vec3(dot(col, vec3(0.299, 0.587, 0.114)));
-  float saturation = mix(0.3, 1.3 + uKick * 0.5, uEnergy);
+  float saturation = mix(0.9, 1.3 + uKick * 0.5, uEnergy);
   col = mix(gray, col, saturation);
 
-  // Red channel boost on kicks — pure red dominance
-  col.r += uKick * 0.4;
-  col.g = mix(col.g, col.g * 0.3, uKick * 0.6);
-  col.b = mix(col.b, col.b * 0.2, uKick * 0.4);
+  // Red channel boost on kicks — tamed (was +0.4 R and ×0.3 G / ×0.2 B
+  // applied to EVERY pixel on every kick, painting the whole screen orange
+  // through any breakcore track). Keeps a slight red tint without nuking
+  // greens/blues.
+  col.r += uKick * 0.12;
+  col.g = mix(col.g, col.g * 0.75, uKick * 0.4);
+  col.b = mix(col.b, col.b * 0.7, uKick * 0.3);
 
-  // Hue rotation — spectrum cycling driven by frequency bands
+  // Hue rotation — spectrum cycling driven by frequency bands.
+  // Global brightness boost reduced (was 1.4+0.4*e, now flat 1.1 at peak)
+  // to keep tendrils discrete instead of washing the whole screen at mid energy.
   float hueShift = uTime * uEnergy * 2.0 + uEnergy * 2.0 + uHat * 3.0 + uSnare * 2.0 + uKick * 4.0;
   col = col * vec3(
     sin(hueShift) * 0.5 + 1.0,
     sin(hueShift + 2.09) * 0.3 + 1.0 + uSub * 0.2,
     sin(hueShift + 4.18) * 0.5 + 1.0
-  ) * mix(1.0, 1.4 + uEnergy * 0.4, uEnergy);
+  ) * mix(1.0, 1.1, uEnergy);
 
-  // Contrast grading — EXTREME S-curve at peaks (dark gets darker, bright explodes)
-  // PHASE 6: Color crushing and extreme clipping
-  float contrastAmt = mix(0.05, 0.25, uEnergy);
+  // Contrast grading — gentler at peaks (was 0.25 -> 0.15) so highlights
+  // don't all clip to pure white above 0.75 brightness
+  float contrastAmt = mix(0.05, 0.15, uEnergy);
   col = smoothstep(contrastAmt, 1.0 - contrastAmt, col);
   col = mix(col, col * col, uKick * 0.3); // non-linear compression on kicks
 
-  // PHASE 6: Aggressive color crushing on sustained high energy
+  // Color crushing tamed — pow 0.4 -> 0.6 (less shadow lift), mult 1.5 -> 1.15
+  // (less highlight blow). Keeps the punch without nuking the tendril detail.
   if (uEnergy > 0.75) {
-    col = pow(col, vec3(0.4 + uEnergy * 0.3)); // Crush shadows
-    col = mix(col, clamp(col * 1.5, 0.0, 1.0), smoothstep(0.75, 1.0, uEnergy)); // Blow highlights
+    col = pow(col, vec3(0.6 + uEnergy * 0.2));
+    col = mix(col, clamp(col * 1.15, 0.0, 1.0), smoothstep(0.75, 1.0, uEnergy));
   }
 
   // Film grain — PHASE 6/7: EXTREME grain and bitcrush effect at high energy
@@ -994,16 +1034,19 @@ void main() {
   float vigF = 1.0 - (dot(vig, vig) * vigStrength + vigPulse * uKick);
   col *= max(vigF, mix(0.6, mix(0.1, 0.3, uKick), uEnergy));
 
-  // Red edge bleed — INTENSE, grows with kicks (danger signal)
-  float redVig = dot(vig, vig) * uEnergy * (2.0 + uKick * 3.0);
-  col.r += redVig * uKick * 0.5;
-  col.g -= redVig * (0.12 + uKick * 0.2);
-  col.b -= redVig * (0.18 + uKick * 0.25);
+  // Red edge bleed — tamed (was 2.0+3.0*kick coeff, now 0.5+0.8*kick).
+  // The corners were being heavily red-pushed + green/blue-subtracted,
+  // creating the pink/salmon wash between tendrils instead of deep black.
+  float redVig = dot(vig, vig) * uEnergy * (0.5 + uKick * 0.8);
+  col.r += redVig * uKick * 0.2;
+  col.g -= redVig * (0.04 + uKick * 0.08);
+  col.b -= redVig * (0.06 + uKick * 0.1);
 
-  // Screen burn-in on sustained high energy (red glow)
+  // Screen burn-in on sustained high energy (red glow) — reduced 0.4 -> 0.12
+  // to stop the orange-red wash dominating peak energy frames
   if (uEnergy > 0.7) {
     float burnGlow = smoothstep(0.7, 1.0, uEnergy) * (1.0 - length(vig) * 0.5);
-    col += vec3(burnGlow * 0.4, burnGlow * 0.1, 0.0);
+    col += vec3(burnGlow * 0.12, burnGlow * 0.03, 0.0);
   }
 
   // PHASE 7: Screen edge color bleeding (edges push color inward)
@@ -1125,7 +1168,7 @@ function createFBO(w, h) {
   return { fb, tex };
 }
 
-let sceneResFactor = 0.5; // half-res default, quarter on hitlag
+let sceneResFactor = 0.4; // 0.4x normally (perf), quarter on hitlag
 
 function rebuildFBs(forceScene) {
   const w = glCanvas.width, h = glCanvas.height;
@@ -1693,23 +1736,55 @@ function detectSections(tl) {
   const timeToNextBreakdown = new Float32Array(frameCount);
   const sectionProgress = new Float32Array(frameCount); // 0-1 progress through current section
 
-  // Pass 1: Find drops — energy jumps from <0.3 to >0.7 within 0.5s (30 frames)
-  const dropWindow = Math.round(0.5 * fps);
+  // Energy stats — log so we can see what range the track actually has
+  let eMin = 1, eMax = 0, eSum = 0;
+  for (let f = 0; f < frameCount; f++) {
+    if (energy[f] < eMin) eMin = energy[f];
+    if (energy[f] > eMax) eMax = energy[f];
+    eSum += energy[f];
+  }
+  const eAvg = eSum / frameCount;
+  console.log(`[ANALYZE] Energy: min=${eMin.toFixed(2)} max=${eMax.toFixed(2)} avg=${eAvg.toFixed(2)} frames=${frameCount}`);
+
+  // Pass 1: Find drops using a long-baseline relative detection.
+  // Threshold is calibrated against the track's actual range so even flat
+  // high-energy tracks produce drops.
+  const baselineWindow = Math.round(4.0 * fps);
+  const currentWindow = Math.round(0.25 * fps);
   const dropFrames = [];
-  for (let f = dropWindow; f < frameCount; f++) {
-    // Look back: was energy low recently?
-    let minBefore = 1;
-    for (let b = 1; b <= dropWindow; b++) {
-      if (energy[f - b] < minBefore) minBefore = energy[f - b];
-    }
-    // Current energy is high, recent past was low
-    if (minBefore < 0.3 && energy[f] > 0.55) {
-      // Check it's not too close to a previous drop
+
+  // Detection diagnostics — track top rises so we know how close we are to triggering
+  let maxRise = 0;
+  let maxRiseFrame = 0;
+
+  for (let f = baselineWindow; f < frameCount; f++) {
+    let baselineSum = 0;
+    for (let b = currentWindow + 1; b <= baselineWindow; b++) baselineSum += energy[f - b];
+    const baseline = baselineSum / (baselineWindow - currentWindow);
+
+    let curSum = 0;
+    for (let b = 0; b < currentWindow; b++) curSum += energy[f - b];
+    const cur = curSum / currentWindow;
+
+    const rise = cur - baseline;
+    if (rise > maxRise) { maxRise = rise; maxRiseFrame = f; }
+
+    // Very lenient: any rise > 0.04 above 4-second baseline, with cur in the
+    // upper third of the track's dynamic range. Breakcore drops are usually
+    // sustained intensity bumps, not absolute quiet->loud transitions.
+    const dynRange = Math.max(0.1, eMax - eMin);
+    const floor = eMin + dynRange * 0.4;
+    const isDrop = (cur > baseline + 0.04 && cur > floor) ||
+                   (baseline < 0.3 && cur > 0.5);
+
+    if (isDrop) {
       if (dropFrames.length === 0 || f - dropFrames[dropFrames.length - 1] > fps * 2) {
         dropFrames.push(f);
       }
     }
   }
+  const dropTimes = dropFrames.slice(0, 5).map(f => (f / fps).toFixed(1) + 's').join(', ');
+  console.log(`[ANALYZE] Drops: ${dropFrames.length} found. First 5 at: [${dropTimes}]. Max rise observed: ${maxRise.toFixed(3)} at ${(maxRiseFrame/fps).toFixed(1)}s`);
 
   // Pass 2: Find breakdowns — sustained energy <0.25 for >2s
   const breakdownMinFrames = Math.round(2 * fps);
@@ -3210,7 +3285,7 @@ function frame(nowMs) {
     renderFrame(dt, time, energy, kick, snare, hat, chaos, section, sectionFogMul, ant);
     return;
   } else {
-    const newFactor = 0.5;
+    const newFactor = 0.4;
     if (Math.abs(sceneResFactor - newFactor) > 0.01) {
       sceneResFactor = newFactor;
       rebuildFBs(true);
@@ -3337,38 +3412,50 @@ function renderFrame(dt, time, energy, kick, snare, hat, chaos, section, section
 
   drawFullscreenTriangle();
 
-  // ── Pass 2: Post-processing ──
-  const src = ppFB[ppIdx], dst = ppFB[1 - ppIdx];
-  gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fb);
-  gl.viewport(0, 0, screenW, screenH);
-  gl.useProgram(postProg);
-  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, sceneFB.tex); gl.uniform1i(postU.uScene, 0);
-  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, src.tex); gl.uniform1i(postU.uPrev, 1);
-  gl.uniform1f(postU.uTime, time);
-  gl.uniform1f(postU.uEnergy, energy);
-  gl.uniform1f(postU.uKick, kick);
-  gl.uniform1f(postU.uSnare, snare);
-  gl.uniform1f(postU.uHat, hat);
-  gl.uniform1f(postU.uSub, bands.sub);
-  gl.uniform1f(postU.uChaos, chaos);
-  gl.uniform1f(postU.uCamSpeed, cameraSpeed);
-  gl.uniform1f(postU.uImpact, impactIntensity);
-  gl.uniform1f(postU.uFlash, bhPassFlash);
-  gl.uniform2f(postU.uRes, screenW, screenH);
-  drawFullscreenTriangle();
+  if (CFG.noPostMode) {
+    // Skip post-processing, blit scene directly
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, sceneFB.fb);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    gl.viewport(0, 0, screenW, screenH);
+    gl.blitFramebuffer(0, 0, sceneW, sceneH, 0, 0, screenW, screenH, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+    gl.finish();
+  } else {
+    // ── Pass 2: Post-processing ──
+    const src = ppFB[ppIdx], dst = ppFB[1 - ppIdx];
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fb);
+    gl.viewport(0, 0, screenW, screenH);
+    gl.useProgram(postProg);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, sceneFB.tex); gl.uniform1i(postU.uScene, 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, src.tex); gl.uniform1i(postU.uPrev, 1);
+    gl.uniform1f(postU.uTime, time);
+    gl.uniform1f(postU.uEnergy, energy);
+    gl.uniform1f(postU.uKick, kick);
+    gl.uniform1f(postU.uSnare, snare);
+    gl.uniform1f(postU.uHat, hat);
+    gl.uniform1f(postU.uSub, bands.sub);
+    gl.uniform1f(postU.uChaos, chaos);
+    gl.uniform1f(postU.uCamSpeed, cameraSpeed);
+    gl.uniform1f(postU.uImpact, impactIntensity);
+    gl.uniform1f(postU.uFlash, bhPassFlash);
+    gl.uniform2f(postU.uRes, screenW, screenH);
+    drawFullscreenTriangle();
 
-  // Blit to screen
-  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, dst.fb);
-  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
-  gl.viewport(0, 0, screenW, screenH);
-  gl.blitFramebuffer(0, 0, screenW, screenH, 0, 0, screenW, screenH, gl.COLOR_BUFFER_BIT, gl.LINEAR);
-  gl.finish();
-  ppIdx = 1 - ppIdx;
+    // Blit to screen
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, dst.fb);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    gl.viewport(0, 0, screenW, screenH);
+    gl.blitFramebuffer(0, 0, screenW, screenH, 0, 0, screenW, screenH, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+    gl.finish();
+    ppIdx = 1 - ppIdx;
+  }
 
-  // Canvas 2D overlay
-  const W = window.innerWidth, H = window.innerHeight;
-  const hue = ((cumulativeHue * 20 + spectralCentroid * 0.1) % 360 + 360) % 360;
-  const aliveP = drawOverlay(dt, W, H, energy, kick, hue, section);
+  // Canvas 2D overlay (disabled in minimal mode for performance testing)
+  let aliveP = 0;
+  if (!CFG.minimalMode) {
+    const W = window.innerWidth, H = window.innerHeight;
+    const hue = ((cumulativeHue * 20 + spectralCentroid * 0.1) % 360 + 360) % 360;
+    aliveP = drawOverlay(dt, W, H, energy, kick, hue, section);
+  }
 
   // HUD
   if (showDebug) {
@@ -3424,11 +3511,12 @@ function renderFrame(dt, time, energy, kick, snare, hat, chaos, section, section
       console.log(`[HUE] energy=${syncData.energy.toFixed(3)} anticipation=${syncData.anticipation.toFixed(2)} drop_in=${syncData.timeToNextDrop.toFixed(1)}s bpm=${syncData.bpm} section=${syncData.section}`);
     }
 
-    fetch(hueServiceUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(syncData),
-    }).catch(() => {});
+    // Disabled — debugging visual sharpness, removes any network jitter
+    // fetch(hueServiceUrl, {
+    //   method: 'POST',
+    //   headers: { 'Content-Type': 'application/json' },
+    //   body: JSON.stringify(syncData),
+    // }).catch(() => {});
   }
 }
 

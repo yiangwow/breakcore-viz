@@ -1,164 +1,109 @@
-# Breakcore Visualizer
+# breakcore-viz
 
-Audio-reactive WebGL2 visualizer for breakcore music. Drop an audio file, fly through an infinite tunnel of raymarched shapes toward a massive black hole. **Now with Philips Hue lights sync!**
+A music visualizer in WebGL2. Drop in an audio file and fly through a tunnel of
+shapes toward a black hole. Kicks, snares and hats each drive different things.
+It can also drive Philips Hue lights.
 
-## Features
+It was built around breakcore. The hit effects and the style meter borrow from
+ULTRAKILL.
 
-✅ **Real-time audio analysis** — FFT bands (sub/low/mid/high), onset detection, spectral centroid  
-✅ **WebGL2 rendering** — Raymarched tunnel, generative parametric SDF, spawn pool with 7 object types  
-✅ **ULTRAKILL-inspired impact system** — Hitlag, impulse shake, FOV spring, pixelation on hard kicks  
-✅ **Style meter** — 6 ranks (STATIC → RISING → VOLATILE → UNHINGED → BREAKCORE → ULTRAKILL)  
-✅ **Canvas 2D overlay** — Starfield, spectrum ring, waveform scope, particles, geometric mandalas  
-✅ **Offline analysis mode** — Pre-compute energy/frequencies for entire song on load  
-✅ **Song section detection** — Breakdown/buildup/drop/sustain classification  
-✅ **Philips Hue integration** — Lights respond to analyzed audio in real-time  
-✅ **Voice synthesis** — Narration with sam-js  
+## Run
 
-## Quick Start
+Open `static/index.html` in a browser. It needs no server.
 
-### Docker (recommended)
+With Docker:
 
 ```bash
-docker-compose up
-# Visit http://localhost:8086
+docker-compose up        # http://localhost:8086
 ```
 
-### Local development
+With the Rust server:
 
 ```bash
-# Requires Rust (build Rust server)
 cargo build --release
-./target/release/breakcore-viz
-# Visit http://localhost:3000
+./target/release/breakcore-viz    # http://localhost:3000
 ```
 
-Open `static/index.html` directly in browser for development (no server needed for testing).
+## Use
+
+1. Drop an audio file on the page, or click to pick one.
+2. Pick a mode:
+   - **Real-time** starts at once and only reacts to what it hears.
+   - **Analyzed** scans the whole track first, so it can see drops coming.
+
+| Key | Does |
+|---|---|
+| `Space` | Pause |
+| `F` | Fullscreen |
+| `D` | Debug readout |
+| Scroll wheel | Volume |
+
+URL flags, for testing:
+
+| Flag | Does |
+|---|---|
+| `?debug` | Start with the debug readout on |
+| `?demo` | Fake audio, no file needed |
+| `?minimal` | Turn the 2D overlay off |
+| `?nopost` | Skip post-processing |
+
+## How it works
+
+Everything is in one file, `static/index.html`.
+
+**Audio.** The sound is split into four bands:
+
+| Band | Range | Mostly |
+|---|---|---|
+| sub | 20 to 100 Hz | kicks |
+| low | 100 to 500 Hz | snares, bass |
+| mid | 500 to 2000 Hz | melody, vocals |
+| high | 2000 to 16000 Hz | hats |
+
+Sub counts the most toward the overall energy, so drums drive the big reactions.
+
+**Song sections.** The track is sorted into breakdown, buildup, drop and sustain.
+The camera slows in a breakdown, speeds up through a buildup and surges on a drop.
+
+**Picture.** Three layers, back to front:
+
+1. A raymarched scene shader, drawn at 0.4x resolution.
+2. A post-processing shader: bloom, colour fringing, feedback trails.
+3. A 2D canvas overlay: stars, spectrum ring, particles, style meter.
+
+## Hue lights
+
+`hue-service/` is a small Node service with no dependencies. The page posts the
+band levels to it, and it sets three lights. This only happens when the page is
+served from a host other than `localhost`.
+
+Set these in `.env`:
+
+```env
+HUE_BRIDGE_IP=<bridge address>
+HUE_API_KEY=<your api key>
+HUE_LIGHT_BIG=1       # room light
+HUE_LIGHT_PC=2        # desk light
+HUE_LIGHT_SCREEN=3    # light behind the screen
+```
+
+Inside Docker the visualizer is on port 8086 and the Hue service on 8087.
 
 ## Deploy
 
 ```bash
-bash deploy.sh
-# Deploys to tt@192.168.1.9:/home/tt/breakcore-viz
-# Visit http://192.168.1.9:8086
+bash deploy.sh [user@host]
 ```
 
-## Hue Lights Setup
+## Files
 
-Set env vars in `.env` on deployment server:
-
-```env
-HUE_BRIDGE_IP=192.168.1.10
-HUE_API_KEY=<your-api-key>
-HUE_LIGHT_BIG=1          # Room light (overall energy + section mood)
-HUE_LIGHT_PC=2           # Left desk (bass-responsive, kick pulses)
-HUE_LIGHT_SCREEN=3       # Screen light (treble-responsive, cool colors)
-```
-
-The hue-service sidecar (Node.js) syncs lights to the visualizer's offline-analyzed audio data, not real-time. Lights react ahead of beats with:
-- **Low energy**: Subtle fearful trembling, muted colors, low brightness
-- **High energy**: Dramatic color shifts, saturated hues, intense brightness
-
-## Architecture
-
-```
-[Browser: WebGL2 + Canvas + Web Audio API]
-     ↓ (offline pre-analyzed audio data)
-[Hue Service: Node.js, maps energy → light state]
-     ↓ (HTTP API calls)
-[Hue Bridge] → [Hue Lights]
-```
-
-### Frontend (static/index.html)
-
-- **Size**: ~3,600 lines (JS + GLSL inline)
-- **Audio**: Web Audio API FFT (2048 bins), 4-band filtering, onset detection
-- **Rendering**: WebGL2 scene shader (half-res), post-processing (full-res), Canvas 2D overlay
-- **Offline Analysis**: Full FFT pass over entire audio file on load, pre-computes energy for all frames
-- **Hue Sync**: Sends offline data to hue-service every 150ms (~6.7fps)
-
-### Backend (src/main.rs)
-
-- **Server**: Rust `tiny_http`, serves index.html + `/health` endpoint
-- **Port**: 3000 (Docker: 8086 external)
-- **Endpoints**:
-  - `GET /` — serves index.html
-  - `GET /health` — `{"status":"ok"}`
-
-### Hue Service (hue-service/server.js)
-
-- **Port**: 3001 (Docker: 8087 external)
-- **Endpoints**:
-  - `POST /sync` — receives `{sub, low, mid, high, energy, kick, section}`, controls lights
-  - `GET /health` — `{"status":"ok"}`
-- **Dependencies**: Node.js stdlib only (no npm)
-- **Rate limiting**: 10 commands/sec to Hue Bridge
-
-## Audio → Visuals
-
-**Frequency bands** (Hz):
-- Sub: 20–100 (kicks)
-- Low: 100–500 (bass)
-- Mid: 500–2000 (snare, vocals)
-- High: 2000–16000 (hats, cymbal wash)
-
-**Energy calculation** (weighted):
-```
-energy = min(1, (sub*2 + low*1.2 + mid*0.5 + high*0.3) / 2)
-```
-Sub-bass dominates; melodic wash is suppressed.
-
-**Impact system** (on hard kicks):
-- Hitlag: 2–6 frame freeze
-- Scene pixelation: quarter-res render
-- FOV spring: snap wide, exponential settle
-- Flash: white-out with red bleed
-- Chromatic aberration boost
-
-## Song Sections
-
-Detected via rolling 5-second energy buffer:
-
-| Section | Energy | Trend | Camera | Fog | Spawns |
-|---------|--------|-------|--------|-----|--------|
-| Breakdown | Low | Flat | Slow | Clear | Monoliths |
-| Buildup | Low→High | Rising | Gradual accel | Closes | Generative clusters |
-| Drop | High | Spike | Blast forward | Dense | Ring gates |
-| Sustain | Normal | Stable | Reactive | Normal | Varied |
-
-## Development
-
-**Query params**:
-- `?debug` — Show HUD (energy, chaos, band levels, style rank)
-- `?demo` — Synthetic audio mode (no file upload needed)
-
-**Browser console logs**:
-- `[HUE]` — Shows energy/kick/section every sync
-- Hue service logs show exact light values being sent
-
-## Testing with Breakcore
-
-Recommended tracks:
-- Venetian Snares — mathematical recursion, tight precision
-- Sewerslvt — glitch, VHS corruption, neon-on-black aesthetic
-- Machine Girl — chaotic, dense transients, harsh textures
-
-## File Structure
-
-```
-breakcore-viz/
-├── src/
-│   └── main.rs              # Rust HTTP server
-├── static/
-│   └── index.html           # WebGL2 visualizer + shaders
-├── hue-service/
-│   ├── server.js            # Hue lights sync service
-│   └── Dockerfile
-├── docker-compose.yml       # Orchestrates Rust + Node services
-├── Dockerfile               # Rust server image
-├── deploy.sh                # SSH deploy helper
-├── CLAUDE.md                # AI codebase documentation
-└── README.md                # This file
-```
+| Path | What |
+|---|---|
+| `static/index.html` | The visualizer: shaders, audio, overlay |
+| `src/main.rs` | Rust server that serves the page |
+| `hue-service/server.js` | Hue lights service |
+| `docker-compose.yml` | Runs both |
+| `deploy.sh` | Copies it to a server and starts it |
 
 ## License
 
